@@ -1,0 +1,116 @@
+services:
+  backend-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./src:/app
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >
+      sh -c "
+      python manage.py makemigrations &&
+      python manage.py migrate &&
+      python manage.py generate_data &&
+      gunicorn config.wsgi:application -k gevent --workers 21 --timeout 35 --max-requests 1000 --max-requests-jitter 100 --graceful-timeout 10 --keep-alive 5 --bind 0.0.0.0:8000"
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:8000/sync/"]
+      interval: 10s  
+      timeout: 30s 
+      retries: 15
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '10'
+          memory: 4G
+        reservations:
+          cpus: '8'
+          memory: 2G
+
+  backend-async:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./src:/app
+    depends_on:
+      backend-sync:
+        condition: service_healthy
+    command: >
+      sh -c "
+      gunicorn main:app -k uvicorn_worker.UvicornWorker --workers 21 --timeout 35 --max-requests 3000 --max-requests-jitter 100 --graceful-timeout 10 --keep-alive 5 --bind 0.0.0.0:8000"
+    networks:
+      - backend
+    ports:
+      - "8002:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '10'
+          memory: 4G
+        reservations:
+          cpus: '2'
+          memory: 2G
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-postgres}"]
+      interval: 3s
+      retries: 5
+      timeout: 5s
+      start_interval: 2s
+    volumes:
+      - ./postgresql.conf:/usr/local/share/postgresql/postgresql.conf:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "config_file=/usr/local/share/postgresql/postgresql.conf"
+    deploy:
+      resources:
+        limits:
+          cpus: '22'
+          memory: 16G
+        reservations:
+          cpus: '8'
+          memory: 8G
+    shm_size: '1gb'
+    
+  wrk:
+    image: williamyeh/wrk
+    depends_on:
+      backend-sync:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "wrk -t16 -c200 -d35s http://backend-async:8000/async/ &&
+      echo '--------async -1- done---------' &&
+      wrk -t16 -c200 -d35s http://backend-sync:8000/sync/ &&
+      echo '--------sync -1- done---------' &&
+      wrk -t16 -c200 -d35s http://backend-sync:8000/sync/hard/ &&
+      echo '--------sync -2- done---------'"
+    networks:
+      - backend
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '1'
+          memory: 1G
+networks:
+  backend:
+    driver: bridge

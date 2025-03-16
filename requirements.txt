@@ -1,0 +1,12 @@
+django>=5.1
+psycopg[binary,pool]>=3.2
+gunicorn[gevent]
+uvicorn
+uvicorn-worker
+Faker
+aiohttp
+requests
+sqlalchemy 
+asyncpg
+fastapi 
+tortoise-orm[psycopg]
